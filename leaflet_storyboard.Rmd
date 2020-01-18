@@ -1,0 +1,378 @@
+---
+title: "Flexdashboard example - Leaflet Maps in a Storyboard"
+output:   
+    flexdashboard::flex_dashboard:
+          storyboard: true
+---
+
+```{r setup, include=FALSE}
+
+# Load necessary packages
+# 1. Create vector - add any necessary package names needed.
+list_of_packages <- c("leaflet", "leaflet.extras", "flexdashboard", "rgdal", "sf", "readr", 
+                      "dplyr", "shiny", "htmltools", "plotly", "rmarkdown", "stringr", "viridis")
+# 2. Create function that will do the job for us whenever required.
+load_packages <- function(package_names){
+  # Assign packages not listed in installed.packages() to a new vector object
+  new_packages <- package_names[!(package_names %in% installed.packages()[,"Package"])]
+  # If length of new_packages returns a value, install all packages named
+  if(length(new_packages)) install.packages(new_packages, repos = "https://cloud.r-project.org/")
+  # Use lappy to load required packages into the workspace
+  lapply(package_names, library, character.only = TRUE)
+}
+# Use the new function to install and load necessary packages
+load_packages(list_of_packages)
+
+
+# Load Data in this chunk so it is available to all users.
+
+# I mocked up dummy data for this example, which is supposed to represent very basic accounts data for a fictional
+# business that has stores in different locations around Scotland.  There is one store per location and For each store 
+# location, you get generic sales, costs, overheads, tax and profit data.  I've done this so you can see how each of the 
+# different pieces of information could be shown on a map in a way that might be useful to a user.
+
+# load in data as csv - I have made this data available to you so you can run this .rmd.
+income <- read.csv(file = "income.csv", stringsAsFactors = FALSE, encoding = "latin1")
+
+# load in boundaries - note that these are postcode boundaries I created in QGIS and are based on postocde areas.
+# readOGR reads ESRI sahpefiles (.shp) and loads them as a SpatialDataFrame - if you are not familiar with these,
+# see here: https://cengel.github.io/rspatial/2_spDataTypes.nb.html
+shapes <- readOGR(dsn=getwd(), layer = "uk_pc_areas_simplified")
+
+# Data cleansing (brief)
+
+# No need for polygons for all of the UK as our fictional company only has stores in Scotland.  
+# Create vector of required postcode areas for use in subsetting
+pcode_sub <- c("AB", "DD", "DG", "EH", "FK", "G", "HS", "IV", "KA", "KW", "KY", "ML", "PA", "PH", "TD", "ZE")
+# Subset shapes - with SpatialDataFrames, you should always subset and not filter as a filter create broken links between
+# data in the slots, which R will automatically attempt to remedy and which will give you odd results.
+shapes <- subset(shapes, shapes@data$PC_AREA %in% pcode_sub)
+# Check only polygons for Scotland remain
+# plot(shapes)
+# PC_AREA required later but is a factor.  Change to char
+shapes@data$PC_AREA <- as.character(shapes@data$PC_AREA)
+
+# Ensure CRS is the same as our input data - 4326
+shapes <- spTransform(shapes, CRS("+init=epsg:4326"))
+
+```
+
+
+
+```{r echo=FALSE}
+# For this example I add each variable in the income data as a separate layer.  This is just to demonstrate
+# how to add layers, how to use layer groups and to add a graduated colour scheme for each variable. 
+
+## Polygon Layers and Layer  Goups
+
+# leaflet makes great use of 'groups', which allow you to bundle together elements of your htmlwidget.  This comes
+# in useful when you want to select specific layers on your map, linking elements such as layers and legends together
+# and a load of other fun uses.
+
+# Start by creating master polygons object that will be the basis for all our layers
+master_poly <- shapes
+# join income data from our .csv to the 'master_poly' data slot in the SpatialDataFrame and drop unnecessary columns
+master_poly@data <- master_poly@data %>%
+  left_join(income, by = c("PC_AREA" = "PostalArea")) %>%
+  dplyr::select(-c("layer")) 
+
+
+# Here we create color palettes that will be used to apply a gradient to each group.  I create a separate palette for 
+# legends as the colours appear reversed when reordering the legend values.
+
+pal1 <- colorBin("Blues", 
+                     domain = master_poly@data$LocalPopulation, bins = 5, pretty = FALSE)
+pal1A <- colorBin("Blues", reverse = TRUE,
+                     domain = master_poly@data$LocalPopulation, bins = 5, pretty = FALSE)
+# Our input data has '£,' in the values, which will not work well with colourBin (or similar functions).  So, we use
+# stringr functions to remove them, then we use as.numeric to ensure the input to colorBin is numeric (not char).
+pal2 <- colorBin("Blues", bins = 5, pretty = FALSE, 
+                     domain = as.numeric(str_remove_all(master_poly@data$Sales, "[£,]" )))
+pal2A <- colorBin("Blues", bins = 5, pretty = FALSE, reverse = TRUE,
+                     domain = as.numeric(str_remove_all(master_poly@data$Sales, "[£,]" )))
+# Notice houw you can add different colour scales to colour your gradients;
+pal3 <- colorBin("Reds", bins = 5, pretty = FALSE, 
+                     domain = as.numeric(str_remove_all(master_poly@data$Costs, "[£,]" )))
+# But you must(!) remember to apply it to all elements in the same group for your map to make sense...
+pal3A <- colorBin("Blues", bins = 5, pretty = FALSE, reverse = TRUE,
+                     domain = as.numeric(str_remove_all(master_poly@data$Costs, "[£,]" )))
+# Like blues, we use greens as a colour scale.  Be careful to pick colour scales that can cope with the number
+# of bins you have - see RColorbrewer for more.  Also, make sure you have an appropriate number of bins or you 
+# will get odd results.
+pal4 <- colorBin("Greens", bins = 20, pretty = FALSE, 
+                     domain = as.numeric(str_remove_all(master_poly@data$Overheads, "[£,]" )))
+pal4A <- colorBin("Greens", bins = 20, pretty = FALSE, reverse = TRUE,
+                     domain = as.numeric(str_remove_all(master_poly@data$Overheads, "[£,]" )))
+# You can also use non-standard colour palettes, such as those available in the Viridis package.  Note that these
+# are colourblind friendly, so may be of benefit if publishing your work...
+pal5 <- colorBin("viridis", bins = 5, pretty = FALSE, 
+                     domain = as.numeric(str_remove_all(master_poly@data$Tax, "[£,]" )))
+pal5A <- colorBin("viridis", bins = 5, pretty = FALSE, reverse = TRUE,
+                     domain = as.numeric(str_remove_all(master_poly@data$Tax, "[£,]" )))
+# Using pretty=TRUE, R will determine the best number of bins to get 'pretty' breaks.  It will ignore
+# the bins=5 and change it to the most appropriate number if it cannot give you pretty bins using your settings.
+# Here I ask for six bins but 'pretty=TRUE' changes it to five;
+pal6 <- colorBin("Blues", bins = 6, pretty = TRUE, 
+                     domain = as.numeric(str_remove_all(master_poly@data$Profit, "[£,]" )))
+pal6A <- colorBin("Blues", bins = 6, pretty = TRUE, reverse = TRUE,
+                     domain = as.numeric(str_remove_all(master_poly@data$Profit, "[£,]" )))
+
+# I create a different palette for each variable as the 'colourBin' function calculates how large
+# each bin should be depending on the values in that specific column.  That way, each layer will have
+# gradiated colours that give meaningful indications of value. 
+
+```
+
+
+Leaflet Maps {.storyboard}
+===================================
+
+### Local Population {data-commentary-width=400}
+
+```{r map}
+
+# Note from above that {.storyboard} is applied to this page on the dashboard.  This means that this
+# page will be a storyboard.  Any other pages are not affected, so you can have a mix of layouts
+# in a single flexdashboard.
+
+# Also, we can specify the width of a commentary section that can be added to each element.  Below
+# you will notice ***, which designates the start of a commentary section.  You can add basic text 
+# immediately after this (ensuring one line of space) without having to write any further code.
+
+## CREATE LEAFTLET MAP
+
+# Create basic starting point, adding two potential basemaps.  Here I use OSM's standard map and 
+# ESRI's grey canvas, which the user will be able to choose between in the finished product.
+
+m <-  leaflet() %>%
+  addTiles(group = "OSM") %>%
+  addProviderTiles(provider = providers$Esri.WorldGrayCanvas, group = "ESRI Grey")
+
+
+# Add each of the target vairables in our data as individual polygon layers on the basic map
+
+# In these steps we use 'addPolygons' to add our shapes to the map, along with values from each
+# target variable as separate layers.  
+
+# In the addPolygons function we specify the input data, apply a group, give some styling to the
+# polygon, including line colour, fill colour and transparency.  We then repeat this for when the
+# polygon is highlighted, so that it appears differently than when not highlighted.  Next we 
+# specify how to label each polygon in the layer - here I use values from the same variable but
+# you are not restricted - and we specify content/formatting of a pop-up that appears when
+# the polygon is clicked.
+  
+#Population
+m <- m %>% addPolygons(data = master_poly, group = "LocalPopulation",
+                  weight = 1, fillColor = ~pal1(LocalPopulation), opacity = 0.75,
+                  stroke = TRUE, color = "Grey", dashArray = "3", fillOpacity = 0.7,
+                  highlight = highlightOptions(
+                    weight = 2,
+                    fillOpacity = 0.9,
+                    bringToFront = TRUE),
+                  label = master_poly@data$LocalPopulation,
+                  popup = ~paste0( "<h3>", Location, "</h3>", 
+                                   "Population: ", prettyNum(LocalPopulation, big.mark = ","), "<br>",
+                                   "Postcode Area: ", master_poly@data$PC_AREA)) %>%
+
+  # We want every layer to have it's own legend and we want each legend to appear with the correct
+  # set of polygons, so we add the legend to the same group.
+
+        addLegend(position = "bottomright", pal = pal1A, values = rev(master_poly@data$LocalPopulation), 
+                group = "LocalPopulation", title = "Local Population Count", opacity = 0.9,
+                # here I create a function that will reorder the legend so the largest values are at the top
+                labFormat = labelFormat(digits=-3, transform = function(x) sort(x, decreasing = TRUE))) %>%
+
+# Now we repeat this process for all other variables that we want to use;
+  
+# Sales
+
+      addPolygons(data = master_poly, group = "Sales",
+            weight = 1, fillColor = ~pal2(as.numeric(str_remove_all(master_poly@data$Sales, "[£,]" ))), 
+            opacity = 0.95, stroke = TRUE, color = "Grey", dashArray = "3", fillOpacity = 0.7,
+            highlight = highlightOptions(
+              weight = 2,
+              fillOpacity = 0.9,
+              bringToFront = TRUE),
+            label = master_poly@data$Sales,
+            popup = ~paste0( "<h3>", Location, "</h3>", 
+                             "Sales: ", master_poly@data$Sales, "<br>", 
+                             "Postcode Area: ", master_poly@data$PC_AREA)) %>%
+      addLegend(position = "bottomright", pal = pal2A, values = master_poly@data$Sales,
+                group = "Sales", title = "Sales", opacity = 0.9,
+                labFormat = labelFormat(prefix = "£", digits=-2, transform = function(x) sort(x, decreasing = TRUE))) %>%
+
+# Costs
+
+      addPolygons(data = master_poly, group = "Costs",
+            weight = 1, fillColor = ~pal3(as.numeric(str_remove_all(master_poly@data$Costs, "[£,]" ))), 
+            opacity = 0.95, stroke = TRUE, color = "Grey", dashArray = "3", fillOpacity = 0.7,
+            highlight = highlightOptions(
+              weight = 2,
+              fillOpacity = 0.9,
+              bringToFront = TRUE),
+            label = master_poly@data$Costs,
+            popup = ~paste0( "<h3>", Location, "</h3>", 
+                             "Costs: ", master_poly@data$Costs, "<br>", 
+                             "Postcode Area: ", master_poly@data$PC_AREA)) %>%
+      addLegend(position = "bottomright", pal = pal3A, values = master_poly@data$Costs,
+                group = "Costs", title = "Costs", opacity = 0.9,
+                labFormat = labelFormat(prefix = "£", digits=-2, transform = function(x) sort(x, decreasing = TRUE))) %>%
+
+# Overheads
+
+      addPolygons(data = master_poly, group = "Overheads",
+            weight = 1, fillColor = ~pal4(as.numeric(str_remove_all(master_poly@data$Overheads, "[£,]" ))), 
+            opacity = 0.95, stroke = TRUE, color = "Grey", dashArray = "3", fillOpacity = 0.7,
+            highlight = highlightOptions(
+              weight = 2,
+              fillOpacity = 0.9,
+              bringToFront = TRUE),
+            label = master_poly@data$Overheads,
+            popup = ~paste0( "<h3>", Location, "</h3>", 
+                             "Overheads: ", master_poly@data$Overheads, "<br>", 
+                             "Postcode Area: ", master_poly@data$PC_AREA)) %>%
+      addLegend(position = "bottomright", pal = pal4A, values = master_poly@data$Overheads,
+                group = "Overheads", title = "Overheads", opacity = 0.9,
+                labFormat = labelFormat(prefix = "£", digits=-2, transform = function(x) sort(x, decreasing = TRUE))) %>%
+
+# Tax
+
+      addPolygons(data = master_poly, group = "Tax",
+            weight = 1, fillColor = ~pal5(as.numeric(str_remove_all(master_poly@data$Tax, "[£,]" ))), 
+            opacity = 0.95, stroke = TRUE, color = "Grey", dashArray = "3", fillOpacity = 0.7,
+            highlight = highlightOptions(
+              weight = 2,
+              fillOpacity = 0.9,
+              bringToFront = TRUE),
+            label = master_poly@data$Tax,
+            popup = ~paste0( "<h3>", Location, "</h3>", 
+                             "Tax: ", master_poly@data$Tax, "<br>", 
+                             "Postcode Area: ", master_poly@data$PC_AREA)) %>%
+      addLegend(position = "bottomright", pal = pal5A, values = master_poly@data$Tax,
+                # by removing 'digits=2' we notice that the legend contains decimals that we might not want
+                group = "Tax", title = "Tax", opacity = 0.9,
+                labFormat = labelFormat(prefix = "£", transform = function(x) sort(x, decreasing = TRUE))) %>%
+
+
+# Profit 
+
+      addPolygons(data = master_poly, group = "Profit",
+            weight = 1, fillColor = ~pal6(as.numeric(str_remove_all(master_poly@data$Profit, "[£,]" ))), 
+            opacity = 0.95, stroke = TRUE, color = "Grey", dashArray = "3", fillOpacity = 0.7,
+            highlight = highlightOptions(
+              weight = 2,
+              fillOpacity = 0.9,
+              bringToFront = TRUE),
+            label = master_poly@data$Profit,
+            popup = ~paste0( "<h3>", Location, "</h3>", 
+                             "Profit: ", master_poly@data$Profit, "<br>", 
+                             "Postcode Area: ", master_poly@data$PC_AREA)) %>%
+      addLegend(position = "bottomright", pal = pal6A, values = master_poly@data$Profit,
+                group = "Profit", title = "Profit", opacity = 0.9,
+                labFormat = labelFormat(prefix = "£", digits=-2, transform = function(x) sort(x, decreasing = TRUE))) %>%
+
+
+# Add layer controls
+# Finally we need to add some controls so that our map behaves in the way we want.  
+  # Basegroups give the user radial boxes in which only one group of elements can be selected (e.g. basemaps)
+  # Overlaygroups give the user checkboxes that allow selection of multiple elements (e.g. layers)
+  # In the options I specify that the container for the groups are not collapsed when the document opens
+  # Hidegroup lets you specify which elements should not be automatically selected when the document opens.
+
+     addLayersControl( baseGroups = c("OSM", "ESRI Grey"),  
+                            overlayGroups = c("LocalPopulation", "Sales", "Costs", "Overheads", "Tax", "Profit"),
+                            options = layersControlOptions(collapsed = FALSE)) %>%
+    hideGroup(c("Sales", "Costs", "Overheads", "Tax", "Profit"))
+
+
+m
+```
+
+
+***
+Commentary
+
+This is our commentary section where you can add simple, unformatted text to your map.  As standard, this section is set to a width of 250 but I tailored this to 400. In flexdashboard, you have a range of options for setting sizing (see [here](https://rmarkdown.rstudio.com/flexdashboard/using.html#sizing)).
+
+Empty lines are accepted in your Commentary section but other items may be ignored if you are not careful, such as a random linebreak in a sentence;
+
+If you want to add more detail you can use basic
+markdown tools like **bold** or *italic*.  Or you can write HTML that will further customise your text using the HTML function;
+
+```{r Comments}
+HTML("<big><strong> This is a Title </strong></big>
+      <br>
+      <p>By mixing in HTML tags, you can tailor the commentary section, which otherwise would be simple text.</p>
+      <center><p> You can also include HTML CSS that will make the buttons smaller in storyboard layout </p></center>.
+      ")
+```
+
+You can even add bulleted lists...
+
+* Item one
+    + sub one
+
+And ordered lists... 
+
+1. Item 1
+2. Item 2
+3. Item 3
+    + Item 3a
+    + Item 3b
+    
+But be careful as some markdown formatting will conflict with flexdashbaord.  For example, this commentary section will continue until a 
+new page (=======) or container/section (###) is specified.  The specifier (###) in flexdashboard is also a heading specifier 
+in markdown, so R gets confused if you add #s at the start of a line in storyboard commentary.
+
+```{r}
+# Finally, the below code appears at the bottom of this example and it applies CSS styling to the buttons at the top of the storyboard.
+# Try adding/removing it to notice the differences it makes.
+# <style>
+# 
+# .storyboard-nav .sbframelist {
+#     margin: 0 auto;
+#     width: 94%;
+#     height: 50px;
+#     overflow: hidden;
+#     text-shadow: none;
+#     margin-bottom: 8px;
+# }
+# 
+# .storyboard-nav .sbnext, .storyboard-nav .sbprev {
+#     width: 2%;
+#     height: 50px;
+#     font-size: 25px;
+# }
+# 
+# </style>
+```
+
+
+
+**I hope you find this useful!**  
+
+Anthony
+
+
+
+
+
+
+<style>
+
+.storyboard-nav .sbframelist {
+    margin: 0 auto;
+    width: 94%;
+    height: 50px;
+    overflow: hidden;
+    text-shadow: none;
+    margin-bottom: 8px;
+}
+
+.storyboard-nav .sbnext, .storyboard-nav .sbprev {
+    width: 2%;
+    height: 50px;
+    font-size: 25px;
+}
+
+</style>
